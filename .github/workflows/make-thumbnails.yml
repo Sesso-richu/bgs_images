@@ -1,0 +1,76 @@
+name: Make thumbnails
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'folder/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: make-thumbnails
+  cancel-in-progress: false
+
+jobs:
+  thumbnails:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install sharp
+        run: npm install --no-save sharp
+
+      - name: Make thumbnails for new images
+        run: |
+          node - <<'EOF'
+          const fs = require('fs');
+          const path = require('path');
+          const sharp = require('sharp');
+
+          const QUALITY = 25;  // MozJPEG quality (same as Squoosh)
+          const MAX_SIDE = 0;  // 0 = keep the original size. Example: 600 = longest side 600px
+
+          (async () => {
+            fs.mkdirSync('view', { recursive: true });
+            let made = 0;
+            for (const name of fs.readdirSync('folder').sort()) {
+              if (!/\.jpe?g$/i.test(name)) continue;
+              const out = path.join('view', name.replace(/\.[^.]+$/, '') + '_view.jpg');
+              if (fs.existsSync(out)) continue; // already made
+              let img = sharp(path.join('folder', name)).rotate();
+              if (MAX_SIDE > 0) {
+                img = img.resize({ width: MAX_SIDE, height: MAX_SIDE, fit: 'inside', withoutEnlargement: true });
+              }
+              await img.jpeg({ quality: QUALITY, mozjpeg: true }).toFile(out);
+              console.log('made', out);
+              made++;
+            }
+            console.log('done:', made, 'new thumbnails');
+          })().catch((e) => { console.error(e); process.exit(1); });
+          EOF
+
+      - name: Commit thumbnails and request a Pages build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add view
+          if git diff --cached --quiet; then
+            echo "No new thumbnails"
+          else
+            git commit -m "Add thumbnails"
+            git pull --rebase
+            git push
+            gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds" || echo "Pages build request failed (ignored)"
+          fi
